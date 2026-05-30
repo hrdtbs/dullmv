@@ -55,15 +55,31 @@ def default_output_path(dsl_path: Path) -> Path:
     return outputs_dir / f"{dsl_path.stem}.mp4"
 
 
-def generate(dsl_path: Path, out_path: Path | None = None) -> Path:
+def resolve_media_path(path: Path | str, base_dir: Path) -> Path:
+    """Resolve a media path relative to base_dir unless already absolute."""
+    resolved = Path(path)
+    if not resolved.is_absolute():
+        resolved = base_dir / resolved
+    return resolved.resolve()
+
+
+def generate(
+    dsl_path: Path,
+    out_path: Path | None = None,
+    *,
+    base_image: Path | str | None = None,
+    audio: Path | str | None = None,
+) -> Path:
     dsl_path = dsl_path.resolve()
     dsl = parse_file(str(dsl_path))
 
     # ---- Globals ----
     g = dsl.get("globals", {})
     base_dir = dsl_path.parent
-    img_path = base_dir / g.get("base_image", "Bloom.png")
-    audio_path = base_dir / g.get("audio", "Bloom.wav")
+    img_ref = base_image if base_image is not None else g.get("base_image", "Bloom.png")
+    audio_ref = audio if audio is not None else g.get("audio", "Bloom.wav")
+    img_path = resolve_media_path(img_ref, base_dir)
+    audio_path = resolve_media_path(audio_ref, base_dir)
     size = _to_tuple(g.get("size"))
     fps = int(g.get("fps", 30))
     opening_duration = _to_float(g.get("opening_duration"), 3.0)
