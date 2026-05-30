@@ -41,8 +41,7 @@ class ProfileStats:
         print("--- Profile ---")
         print(f"Frames: {self.n_frames} (workers={self.workers})")
         print(
-            f"Frame generation: {self.frame_seconds:.2f}s "
-            f"({self._pct(self.frame_seconds, total)})"
+            f"Frame generation: {self.frame_seconds:.2f}s ({self._pct(self.frame_seconds, total)})"
         )
         print(
             f"Encoding:         {self.encode_seconds:.2f}s "
@@ -499,9 +498,7 @@ def generate(
 
     print(f"Rendering {duration:.1f}s clip ({n_frames} frames, workers={workers})...")
     if workers > 1:
-        frames, profile_stats = _render_frames_parallel(
-            n_frames, effects, ctx, workers, profile
-        )
+        frames, profile_stats = _render_frames_parallel(n_frames, effects, ctx, workers, profile)
     else:
         frames, profile_stats = _render_frames_sequential(n_frames, effects, ctx, profile)
 

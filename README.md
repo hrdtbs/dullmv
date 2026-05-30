@@ -14,6 +14,13 @@ DSL-driven music video generator. Define effects, timing, and parameters in a `.
 git clone <repository-url>
 cd dullmv
 uv sync --all-extras
+uv run pre-commit install
+```
+
+Or run both steps in one command:
+
+```bash
+uv run python scripts/setup_dev.py
 ```
 
 ### Input media
@@ -142,8 +149,13 @@ On macOS, a common alternative is `/System/Library/Fonts/Supplemental/Impact.ttf
 uv run pytest
 uv run ruff check .
 uv run ruff format .
-pre-commit install
-pre-commit run --all-files
+uv run pre-commit run --all-files
+```
+
+Re-register Git hooks after cloning on a new machine or if hooks were removed:
+
+```bash
+uv run pre-commit install
 ```
 
 ## License
