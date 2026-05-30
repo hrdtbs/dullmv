@@ -95,6 +95,7 @@ Top-level keys outside any `effect` block. All paths are relative to the `.dsl` 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `size` | tuple `(w, h)` | `(1920, 1080)` | Output resolution in pixels. |
+| `design_size` | tuple `(w, h)` | `(1920, 1080)` | Reference resolution for `light_overlay` and `smoke` blob expressions. Blob positions and radii are evaluated at this size, then scaled to `size`. |
 | `fps` | int | `30` | Frames per second. |
 | `duration` | float | *(auto)* | Total video duration in seconds. If omitted, the length of the `audio` file is used automatically. |
 | `opening_duration` | float | `3.0` | Duration of the opening text phase. |
@@ -440,4 +441,4 @@ effect sparkle {
 - **Parameter Tuning:** Edit numbers or expressions without restarting the Python interpreter.
 - **Path Resolution:** `base_image`, `audio`, and `font` paths are resolved relative to the `.dsl` file location. In this repo, place media in `inputs/` and reference it from `examples/` with `../inputs/...`.
 - **Default Output:** Unless `-o` is passed, rendered videos go to `outputs/<dsl-stem>.mp4` under the project root.
-- **Resolution Independence:** Use **relative coordinates** (`0.0~1.0`) for `anchor`, `start_pos`, and `end_pos`. This guarantees that changing `size` (e.g. from `1280 720` to `1920 1080`) does not require rewriting blob positions or text coordinates. Combined with using `anchor_x` / `anchor_y` inside expressions, the entire effect layout scales automatically.
+- **Resolution Independence:** Use **relative coordinates** (`0.0~1.0`) for `anchor`, `start_pos`, and `end_pos`. For `light_overlay` and `smoke`, pixel literals in expressions (e.g. `50`, `140`) are evaluated at `design_size` (default `1920 1080`) and automatically scaled to match `size`, so changing output resolution does not require rewriting blob expressions.

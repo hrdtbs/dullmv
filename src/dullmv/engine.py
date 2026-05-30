@@ -10,6 +10,26 @@ from PIL import Image, ImageDraw
 
 SAFE_BUILTINS = {}
 
+DEFAULT_DESIGN_WIDTH = 1920
+DEFAULT_DESIGN_HEIGHT = 1080
+
+
+def _design_size(ctx):
+    design = ctx.get("design_size") if ctx else None
+    if design is None:
+        return DEFAULT_DESIGN_WIDTH, DEFAULT_DESIGN_HEIGHT
+    if isinstance(design, (tuple, list)) and len(design) >= 2:
+        return int(design[0]), int(design[1])
+    return DEFAULT_DESIGN_WIDTH, DEFAULT_DESIGN_HEIGHT
+
+
+def _scale_blob_coords(cx, cy, rx, ry, w, h, ref_w, ref_h):
+    if w == ref_w and h == ref_h:
+        return int(cx), int(cy), int(rx), int(ry)
+    sx = w / ref_w
+    sy = h / ref_h
+    return int(cx * sx), int(cy * sy), int(rx * sx), int(ry * sy)
+
 
 def create_eval_env(t, width, height, ctx=None, index=None, **extra):
     """Create a safe evaluation environment for expression strings."""
@@ -152,39 +172,47 @@ EASINGS = {
 # ---------------------------------------------------------------------------
 
 
-def _get_light_overlay_blobs(params, t, ctx):
+def _eval_effect_blob(bdef, t, ctx, index, *, compute_dist_ratio=False):
+    """Evaluate a blob at design resolution, then scale coords to output size."""
     w, h = ctx["width"], ctx["height"]
+    ref_w, ref_h = _design_size(ctx)
+    env = create_eval_env(t, ref_w, ref_h, ctx, index=index)
+    anchor = bdef.get("anchor", (0, 0))
+    if isinstance(anchor, list):
+        anchor = tuple(anchor)
+    anchor = _resolve_tuple(anchor, ref_w, ref_h)
+    color = bdef.get("color", (255, 255, 255))
+    if isinstance(color, list):
+        color = tuple(color)
+    env["anchor_x"] = anchor[0] if len(anchor) > 0 else 0
+    env["anchor_y"] = anchor[1] if len(anchor) > 1 else 0
+    cx = _eval_param(bdef.get("cx", anchor[0]), env)
+    cy = _eval_param(bdef.get("cy", anchor[1]), env)
+    if compute_dist_ratio:
+        max_dist = math.sqrt((ref_w / 2) ** 2 + (ref_h / 2) ** 2)
+        dx = cx - ref_w / 2
+        dy = cy - ref_h / 2
+        dist = math.sqrt(dx * dx + dy * dy)
+        env["dist_ratio"] = min(dist / max_dist, 1.0) if max_dist > 0 else 0
+    rx = _eval_param(bdef.get("rx", 100), env)
+    ry = _eval_param(bdef.get("ry", 100), env)
+    alpha = _eval_param(bdef.get("alpha", 255 if not compute_dist_ratio else 100), env)
+    cx, cy, rx, ry = _scale_blob_coords(cx, cy, rx, ry, w, h, ref_w, ref_h)
+    return {
+        "cx": cx,
+        "cy": cy,
+        "rx": rx,
+        "ry": ry,
+        "color": color,
+        "alpha": int(alpha),
+    }
+
+
+def _get_light_overlay_blobs(params, t, ctx):
     blobs_def = params.get("blob", [])
     if not isinstance(blobs_def, list):
         blobs_def = [blobs_def]
-    blobs = []
-    for i, bdef in enumerate(blobs_def):
-        env = create_eval_env(t, w, h, ctx, index=i)
-        anchor = bdef.get("anchor", (0, 0))
-        if isinstance(anchor, list):
-            anchor = tuple(anchor)
-        anchor = _resolve_tuple(anchor, w, h)
-        color = bdef.get("color", (255, 255, 255))
-        if isinstance(color, list):
-            color = tuple(color)
-        env["anchor_x"] = anchor[0] if len(anchor) > 0 else 0
-        env["anchor_y"] = anchor[1] if len(anchor) > 1 else 0
-        cx = _eval_param(bdef.get("cx", anchor[0]), env)
-        cy = _eval_param(bdef.get("cy", anchor[1]), env)
-        rx = _eval_param(bdef.get("rx", 100), env)
-        ry = _eval_param(bdef.get("ry", 100), env)
-        alpha = _eval_param(bdef.get("alpha", 255), env)
-        blobs.append(
-            {
-                "cx": int(cx),
-                "cy": int(cy),
-                "rx": int(rx),
-                "ry": int(ry),
-                "color": color,
-                "alpha": int(alpha),
-            }
-        )
-    return blobs
+    return [_eval_effect_blob(bdef, t, ctx, i) for i, bdef in enumerate(blobs_def)]
 
 
 def render_light_overlay(params, frame, t, ctx):
@@ -238,44 +266,13 @@ def render_spectrum(params, frame, t, ctx):
 
 
 def _get_smoke_blobs(params, t, ctx):
-    w, h = ctx["width"], ctx["height"]
     blobs_def = params.get("blob", [])
     if not isinstance(blobs_def, list):
         blobs_def = [blobs_def]
-    max_dist = math.sqrt((w / 2) ** 2 + (h / 2) ** 2)
-    blobs = []
-    for i, bdef in enumerate(blobs_def):
-        env = create_eval_env(t, w, h, ctx, index=i)
-        anchor = bdef.get("anchor", (0, 0))
-        if isinstance(anchor, list):
-            anchor = tuple(anchor)
-        anchor = _resolve_tuple(anchor, w, h)
-        color = bdef.get("color", (255, 255, 255))
-        if isinstance(color, list):
-            color = tuple(color)
-        env["anchor_x"] = anchor[0] if len(anchor) > 0 else 0
-        env["anchor_y"] = anchor[1] if len(anchor) > 1 else 0
-        cx = _eval_param(bdef.get("cx", anchor[0]), env)
-        cy = _eval_param(bdef.get("cy", anchor[1]), env)
-        dx = cx - w / 2
-        dy = cy - h / 2
-        dist = math.sqrt(dx * dx + dy * dy)
-        dist_ratio = min(dist / max_dist, 1.0) if max_dist > 0 else 0
-        env["dist_ratio"] = dist_ratio
-        rx = _eval_param(bdef.get("rx", 100), env)
-        ry = _eval_param(bdef.get("ry", 100), env)
-        alpha = _eval_param(bdef.get("alpha", 100), env)
-        blobs.append(
-            {
-                "cx": int(cx),
-                "cy": int(cy),
-                "rx": int(rx),
-                "ry": int(ry),
-                "color": color,
-                "alpha": int(alpha),
-            }
-        )
-    return blobs
+    return [
+        _eval_effect_blob(bdef, t, ctx, i, compute_dist_ratio=True)
+        for i, bdef in enumerate(blobs_def)
+    ]
 
 
 def render_smoke(params, frame, t, ctx):

@@ -332,6 +332,7 @@ def generate(
     img_path = resolve_media_path(img_ref, base_dir)
     audio_path = resolve_media_path(audio_ref, base_dir)
     size = _to_tuple(g.get("size"))
+    design_size = _to_tuple(g.get("design_size"))
     fps = int(g.get("fps", 30))
     opening_duration = _to_float(g.get("opening_duration"), 3.0)
     blob_scale = int(g.get("blob_scale", 8))
@@ -464,6 +465,7 @@ def generate(
     ctx = {
         "width": size[0],
         "height": size[1],
+        "design_size": design_size,
         "beat_times": beat_times,
         "stft": stft,
         "sr": sr,
