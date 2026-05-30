@@ -94,9 +94,7 @@ def discover_flat_jobs(inputs_dir: Path) -> tuple[list[BatchJob], list[str]]:
                 audios_by_stem[stem] = path
 
     for stem in sorted(set(images_by_stem) & set(audios_by_stem)):
-        jobs.append(
-            BatchJob(name=stem, image=images_by_stem[stem], audio=audios_by_stem[stem])
-        )
+        jobs.append(BatchJob(name=stem, image=images_by_stem[stem], audio=audios_by_stem[stem]))
 
     return jobs, warnings
 
