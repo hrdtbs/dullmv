@@ -68,12 +68,6 @@ def _add_batch_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Directory for rendered MP4 files (default: project outputs/)",
     )
     parser.add_argument(
-        "--layout",
-        choices=["auto", "subfolder", "flat"],
-        default="auto",
-        help="How to discover image/audio pairs (default: auto)",
-    )
-    parser.add_argument(
         "--skip-existing",
         action="store_true",
         help="Skip jobs whose output MP4 already exists",
@@ -165,7 +159,7 @@ def _run_batch(args: argparse.Namespace) -> int:
         print(f"Error: inputs directory not found: {inputs_dir}", file=sys.stderr)
         return 1
 
-    jobs, warnings = discover_jobs(inputs_dir, args.layout)
+    jobs, warnings = discover_jobs(inputs_dir)
     for warning in warnings:
         print(f"Warning: {warning}", file=sys.stderr)
 
@@ -173,7 +167,7 @@ def _run_batch(args: argparse.Namespace) -> int:
         print(f"Error: no image/audio pairs found in {inputs_dir}", file=sys.stderr)
         return 1
 
-    print(f"Discovered {len(jobs)} job(s) using layout={args.layout}")
+    print(f"Discovered {len(jobs)} job(s)")
     result = run_batch(
         dsl_path,
         jobs,

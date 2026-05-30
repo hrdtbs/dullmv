@@ -73,31 +73,21 @@ Skip pairs whose output already exists:
 uv run python -m dullmv batch examples/template.dsl --skip-existing
 ```
 
-#### Input layouts
+#### Input layout
 
-**Subfolder (recommended):** each pair lives in its own folder. File names inside the folder can be anything as long as there is exactly one image and one audio file.
-
-```
-inputs/
-  album_track_01/
-    artwork.png
-    mix.wav
-  album_track_02/
-    cover.jpg
-    final.mp3
-```
-
-**Flat:** place files directly in `inputs/` with the same base name.
+Place image and audio files directly in `inputs/` with the same base name:
 
 ```
 inputs/
   song01.png
   song01.wav
-  song02.png
-  song02.wav
+  song02.jpg
+  song02.mp3
 ```
 
-By default, `dullmv batch` uses `--layout auto`: it prefers subfolder pairs when found, otherwise falls back to flat stem matching. Supported image extensions: `.png`, `.jpg`, `.jpeg`, `.webp`. Supported audio extensions: `.wav`, `.mp3`, `.flac`, `.ogg`, `.m4a`.
+This produces `outputs/song01.mp4` and `outputs/song02.mp4`. Subdirectories under `inputs/` are ignored.
+
+Supported image extensions: `.png`, `.jpg`, `.jpeg`, `.webp`. Supported audio extensions: `.wav`, `.mp3`, `.flac`, `.ogg`, `.m4a`.
 
 The template DSL keeps its effect definitions; `base_image` and `audio` paths in the file are overridden per job at render time.
 
