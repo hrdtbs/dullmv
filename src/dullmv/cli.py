@@ -82,6 +82,23 @@ def _add_batch_parser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Continue rendering remaining jobs after a failure",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Parallel frame render workers per job (default: CPU count or DSL workers setting)",
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Print frame generation vs encoding timing breakdown for each job",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="Maximum number of batch jobs to render in parallel (default: 1)",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -175,6 +192,9 @@ def _run_batch(args: argparse.Namespace) -> int:
         skip_existing=args.skip_existing,
         dry_run=args.dry_run,
         continue_on_error=args.continue_on_error,
+        workers=args.workers,
+        profile=args.profile,
+        parallel_jobs=args.jobs,
     )
 
     if args.dry_run:

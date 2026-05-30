@@ -208,7 +208,34 @@ def _eval_effect_blob(bdef, t, ctx, index, *, compute_dist_ratio=False):
     }
 
 
-def _get_light_overlay_blobs(params, t, ctx):
+def _lookup_blobs_from_cache(params, t, ctx):
+    blob_id = params.get("_blob_id")
+    lookup = ctx.get("_blob_lookup")
+    if blob_id is None or lookup is None or blob_id not in lookup:
+        return None
+    fi = ctx.get("_frame_index", int(round(t * ctx.get("fps", 30))))
+    fi = min(max(fi, 0), len(lookup[blob_id]) - 1)
+    return lookup[blob_id][fi]
+
+
+def precompute_blob_lookup(params, n_frames, fps, ctx, *, compute_dist_ratio=False):
+    """Precompute blob lists per frame for parallel rendering."""
+    lookup: list[list] = []
+    for fi in range(n_frames):
+        t = fi / fps
+        ctx["_frame_index"] = fi
+        if compute_dist_ratio:
+            lookup.append(_get_smoke_blobs(params, t, ctx, _use_cache=False))
+        else:
+            lookup.append(_get_light_overlay_blobs(params, t, ctx, _use_cache=False))
+    return lookup
+
+
+def _get_light_overlay_blobs(params, t, ctx, *, _use_cache=True):
+    if _use_cache:
+        cached = _lookup_blobs_from_cache(params, t, ctx)
+        if cached is not None:
+            return cached
     blobs_def = params.get("blob", [])
     if not isinstance(blobs_def, list):
         blobs_def = [blobs_def]
@@ -265,7 +292,11 @@ def render_spectrum(params, frame, t, ctx):
     return np.clip(result, 0, 255).astype(np.uint16)
 
 
-def _get_smoke_blobs(params, t, ctx):
+def _get_smoke_blobs(params, t, ctx, *, _use_cache=True):
+    if _use_cache:
+        cached = _lookup_blobs_from_cache(params, t, ctx)
+        if cached is not None:
+            return cached
     blobs_def = params.get("blob", [])
     if not isinstance(blobs_def, list):
         blobs_def = [blobs_def]
@@ -340,22 +371,47 @@ def _build_text_overlay_rgba(params, t, ctx):
     return np.array(overlay)
 
 
+def precompute_text_overlay_lookup(params, n_frames, fps, ctx, opening_duration):
+    """Precompute RGBA text overlays for the opening phase."""
+    n_open = min(n_frames, int(math.ceil(opening_duration * fps)))
+    lookup: dict[int, np.ndarray] = {}
+    for fi in range(n_open):
+        t = fi / fps
+        lookup[fi] = _build_text_overlay_rgba(params, t, ctx)
+    return lookup
+
+
+def _get_text_overlay(params, t, ctx):
+    fps = ctx.get("fps", 30)
+    fi = ctx.get("_frame_index", int(round(t * fps)))
+    text_id = params.get("_text_id")
+    precomputed = ctx.get("_text_overlay_lookup")
+    if text_id is not None and precomputed is not None and text_id in precomputed:
+        overlay = precomputed[text_id].get(fi)
+        if overlay is not None:
+            return overlay
+    cache_key = (id(params), fi)
+    cache = ctx.setdefault("_text_overlay_cache", {})
+    if cache_key not in cache:
+        cache[cache_key] = _build_text_overlay_rgba(params, t, ctx)
+    return cache[cache_key]
+
+
+def _alpha_composite_overlay(frame, overlay_rgba):
+    """Composite RGBA overlay over frame using PIL-equivalent integer math."""
+    base_rgb = np.clip(frame, 0, 255).astype(np.uint8)
+    base_img = Image.fromarray(base_rgb).convert("RGBA")
+    result = Image.alpha_composite(base_img, Image.fromarray(overlay_rgba))
+    return np.array(result.convert("RGB")).astype(np.uint16)
+
+
 def render_text(params, frame, t, ctx):
     opening_dur = ctx.get("opening_duration", 3.0)
     if t >= opening_dur:
         return frame
 
-    fps = ctx.get("fps", 30)
-    fi = ctx.get("_frame_index", int(round(t * fps)))
-    cache_key = (id(params), fi)
-    cache = ctx.setdefault("_text_overlay_cache", {})
-    if cache_key not in cache:
-        cache[cache_key] = _build_text_overlay_rgba(params, t, ctx)
-
-    overlay = cache[cache_key]
-    base_img = Image.fromarray(np.clip(frame, 0, 255).astype(np.uint8)).convert("RGBA")
-    result = Image.alpha_composite(base_img, Image.fromarray(overlay))
-    return np.array(result.convert("RGB")).astype(np.uint16)
+    overlay = _get_text_overlay(params, t, ctx)
+    return _alpha_composite_overlay(frame, overlay)
 
 
 def _apply_wave_shifts(region, shifts, min_shift):

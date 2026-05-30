@@ -2,28 +2,52 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+from pathlib import Path
+
 import numpy as np
+from PIL import Image
 
 from dullmv.engine import (
+    _alpha_composite_overlay,
+    _build_text_overlay_rgba,
+    _get_light_overlay_blobs,
     _get_sparkle_blobs,
+    precompute_blob_lookup,
     precompute_sparkle_lookup,
+    precompute_text_overlay_lookup,
     render_bass_shake,
     render_blob_layers,
     render_glitch,
     render_spectrum,
 )
-from dullmv.generator import render_frame
+from dullmv.generator import (
+    _load_font,
+    _precompute_effect_lookups,
+    render_frame,
+)
+from dullmv.parser import parse_file
+
+_TEMPLATE_DSL = Path(__file__).resolve().parents[1] / "dsl" / "template.dsl"
 
 
-def _base_ctx(w=320, h=180, fps=30):
+def load_template_effects() -> list[dict]:
+    dsl = parse_file(str(_TEMPLATE_DSL))
+    return dsl.get("effects", [])
+
+
+def _base_ctx(w=320, h=180, fps=30, n_frames=90):
     img_np = np.zeros((h, w, 3), dtype=np.uint8)
     img_np[:, :, 1] = 80
     spectrum_norm = np.linspace(0.1, 1.0, 96, dtype=np.float32)
     spectrum_norm = np.tile(spectrum_norm, (10, 1))
     bass_curve = [0.5] * 100
+    font_path = "C:\\Windows\\Fonts\\impact.ttf"
+    font_size = 24
     return {
         "width": w,
         "height": h,
+        "design_size": (1920, 1080),
         "fps": fps,
         "sr": 44100,
         "hop": 512,
@@ -36,10 +60,33 @@ def _base_ctx(w=320, h=180, fps=30):
         "bass_intensity": lambda t: 0.5,
         "beat_times": np.array([0.0, 0.5, 1.0]),
         "spectrum_norm": spectrum_norm,
-        "pre_sx": np.zeros(fps * 2, dtype=np.float32),
-        "pre_sy": np.zeros(fps * 2, dtype=np.float32),
+        "pre_sx": np.zeros(n_frames, dtype=np.float32),
+        "pre_sy": np.zeros(n_frames, dtype=np.float32),
         "_sparkle_lookup": {},
+        "_blob_lookup": {},
+        "_text_overlay_lookup": {},
+        "font_path": font_path,
+        "font_size": font_size,
+        "font": _load_font(font_path, font_size),
     }
+
+
+def _prepare_effects(effects: list, ctx: dict, n_frames: int = 90) -> list:
+    prepared = deepcopy(effects)
+    _precompute_effect_lookups(prepared, n_frames, ctx["fps"], ctx, ctx["opening_duration"])
+    return prepared
+
+
+def _parallel_frames(effects: list, ctx: dict, n_frames: int) -> list[np.ndarray]:
+    from dullmv import generator as gen_mod
+
+    serialized = gen_mod._serialize_ctx(ctx)
+    gen_mod._init_worker(serialized, effects, False)
+    return [gen_mod._render_frame_worker(fi)[1] for fi in range(n_frames)]
+
+
+def _sequential_frames(effects: list, ctx: dict, n_frames: int) -> list[np.ndarray]:
+    return [render_frame(fi, effects, dict(ctx)) for fi in range(n_frames)]
 
 
 def test_render_blob_layers_shape_and_alpha():
@@ -149,7 +196,7 @@ def test_render_frame_representative_pixels():
 
 
 def test_parallel_matches_sequential(monkeypatch):
-    ctx = _base_ctx()
+    ctx = _base_ctx(n_frames=10)
     effects = [
         {
             "_name": "spectrum",
@@ -159,14 +206,96 @@ def test_parallel_matches_sequential(monkeypatch):
         },
     ]
     n_frames = 10
-    seq_frames = [render_frame(fi, effects, dict(ctx)) for fi in range(n_frames)]
+    seq_frames = _sequential_frames(effects, ctx, n_frames)
+    par_frames = _parallel_frames(effects, ctx, n_frames)
 
-    from dullmv import generator as gen_mod
+    for fi in range(n_frames):
+        assert np.array_equal(seq_frames[fi], par_frames[fi]), f"frame {fi} mismatch"
 
-    monkeypatch.setattr(gen_mod, "_init_worker", gen_mod._init_worker)
-    serialized = gen_mod._serialize_ctx(ctx)
-    gen_mod._init_worker(serialized, effects, False)
-    par_frames = [gen_mod._render_frame_worker(fi)[1] for fi in range(n_frames)]
+
+def test_blob_lookup_matches_sequential():
+    ctx = _base_ctx(n_frames=30)
+    params = {
+        "_name": "light_overlay",
+        "blob": {
+            "anchor": (0.5, 0.5),
+            "color": (255, 200, 100),
+            "cx": "int(width * 0.5 + 20 * sin(t))",
+            "cy": "int(height * 0.5 + 10 * cos(t))",
+            "rx": 40,
+            "ry": 30,
+            "alpha": 120,
+        },
+    }
+    n_frames = 30
+    lookup = precompute_blob_lookup(params, n_frames, ctx["fps"], ctx, compute_dist_ratio=False)
+    params["_blob_id"] = "light_overlay_0"
+    ctx["_blob_lookup"] = {"light_overlay_0": lookup}
+
+    for fi in range(n_frames):
+        t = fi / ctx["fps"]
+        ctx["_frame_index"] = fi
+        sequential = _get_light_overlay_blobs(params, t, ctx, _use_cache=False)
+        from_lookup = _get_light_overlay_blobs(params, t, ctx)
+        assert sequential == from_lookup
+
+
+def test_text_overlay_precompute_matches():
+    ctx = _base_ctx(n_frames=30)
+    params = {
+        "_name": "text",
+        "color": (255, 255, 255),
+        "line": {
+            "text": "TEST",
+            "start_time": 0.0,
+            "slide_duration": 0.9,
+            "fade_duration": 0.6,
+            "start_pos": (-0.4, 0.5),
+            "end_pos": (0.1, 0.5),
+            "easing": "ease_out_cubic",
+        },
+    }
+    n_frames = 30
+    lookup = precompute_text_overlay_lookup(
+        params, n_frames, ctx["fps"], ctx, ctx["opening_duration"]
+    )
+    for fi in range(min(n_frames, len(lookup))):
+        t = fi / ctx["fps"]
+        expected = _build_text_overlay_rgba(params, t, ctx)
+        assert np.array_equal(lookup[fi], expected)
+
+
+def test_text_compose_matches_pil():
+    ctx = _base_ctx(n_frames=10)
+    params = {
+        "color": (255, 255, 255),
+        "line": {
+            "text": "X",
+            "start_time": 0.0,
+            "slide_duration": 0.5,
+            "fade_duration": 0.5,
+            "start_pos": (0.2, 0.5),
+            "end_pos": (0.2, 0.5),
+        },
+    }
+    frame = np.random.default_rng(2).integers(0, 256, (180, 320, 3), dtype=np.uint16)
+    overlay = _build_text_overlay_rgba(params, 0.1, ctx)
+    via_helper = _alpha_composite_overlay(frame, overlay)
+    base_img = Image.fromarray(np.clip(frame, 0, 255).astype(np.uint8)).convert("RGBA")
+    via_pil = np.array(
+        Image.alpha_composite(base_img, Image.fromarray(overlay)).convert("RGB")
+    ).astype(np.uint16)
+    assert np.array_equal(via_helper, via_pil)
+
+
+def test_template_effects_parallel_matches_sequential():
+    ctx = _base_ctx(n_frames=90)
+    ctx["pre_sx"][15:25] = 3.0
+    ctx["pre_sy"][15:25] = 2.0
+    effects = _prepare_effects(load_template_effects(), ctx, n_frames=90)
+    n_frames = 90
+    seq_frames = _sequential_frames(effects, ctx, n_frames)
+    par_frames = _parallel_frames(effects, ctx, n_frames)
 
     for fi in range(n_frames):
         assert np.array_equal(seq_frames[fi], par_frames[fi]), f"frame {fi} mismatch"

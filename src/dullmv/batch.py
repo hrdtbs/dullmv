@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -81,14 +83,25 @@ def run_batch(
     skip_existing: bool = False,
     dry_run: bool = False,
     continue_on_error: bool = False,
+    workers: int | None = None,
+    profile: bool = False,
+    parallel_jobs: int = 1,
 ) -> BatchResult:
     dsl_path = dsl_path.resolve()
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     result = BatchResult()
+    parallel_jobs = max(1, parallel_jobs)
 
-    for index, job in enumerate(jobs, start=1):
+    def _resolve_workers() -> int | None:
+        if workers is not None:
+            return workers
+        if parallel_jobs > 1:
+            return max(1, (os.cpu_count() or 1) // parallel_jobs)
+        return None
+
+    def _render_job(index: int, job: BatchJob) -> tuple[BatchJob, str | None, str | None]:
         out_path = output_dir / job.output_name
         print(f"[{index}/{len(jobs)}] {job.name}")
         print(f"  image: {job.image}")
@@ -96,14 +109,10 @@ def run_batch(
         print(f"  output: {out_path}")
 
         if skip_existing and out_path.is_file():
-            reason = "output already exists"
-            print(f"  skipped: {reason}")
-            result.skipped.append((job, reason))
-            continue
+            return job, "skipped", "output already exists"
 
         if dry_run:
-            result.succeeded.append(job)
-            continue
+            return job, "succeeded", None
 
         try:
             generate(
@@ -111,14 +120,46 @@ def run_batch(
                 out_path,
                 base_image=job.image,
                 audio=job.audio,
+                workers=_resolve_workers(),
+                profile=profile,
             )
-            result.succeeded.append(job)
+            return job, "succeeded", None
         except Exception as exc:
-            message = str(exc)
-            print(f"  failed: {message}", file=sys.stderr)
-            result.failed.append((job, message))
-            if not continue_on_error:
-                break
+            return job, "failed", str(exc)
+
+    if parallel_jobs <= 1 or dry_run:
+        for index, job in enumerate(jobs, start=1):
+            job_result, status, message = _render_job(index, job)
+            if status == "skipped":
+                print(f"  skipped: {message}")
+                result.skipped.append((job_result, message or ""))
+            elif status == "failed":
+                print(f"  failed: {message}", file=sys.stderr)
+                result.failed.append((job_result, message or ""))
+                if not continue_on_error:
+                    break
+            else:
+                result.succeeded.append(job_result)
+        return result
+
+    with ThreadPoolExecutor(max_workers=parallel_jobs) as pool:
+        futures = {
+            pool.submit(_render_job, index, job): job for index, job in enumerate(jobs, start=1)
+        }
+        for future in as_completed(futures):
+            job_result, status, message = future.result()
+            if status == "skipped":
+                print(f"  skipped: {job_result.name} ({message})")
+                result.skipped.append((job_result, message or ""))
+            elif status == "failed":
+                print(f"  failed: {job_result.name}: {message}", file=sys.stderr)
+                result.failed.append((job_result, message or ""))
+                if not continue_on_error:
+                    for pending in futures:
+                        pending.cancel()
+                    break
+            else:
+                result.succeeded.append(job_result)
 
     return result
 

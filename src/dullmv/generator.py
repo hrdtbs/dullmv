@@ -5,6 +5,7 @@ from __future__ import annotations
 import bisect
 import math
 import os
+import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
@@ -12,7 +13,8 @@ from pathlib import Path
 
 import librosa
 import numpy as np
-from moviepy import AudioFileClip, VideoClip
+from moviepy import AudioFileClip
+from moviepy.video.io.ffmpeg_writer import FFMPEG_VideoWriter
 from PIL import Image, ImageFont
 
 from dullmv.engine import (
@@ -20,7 +22,9 @@ from dullmv.engine import (
     _get_light_overlay_blobs,
     _get_smoke_blobs,
     _get_sparkle_blobs,
+    precompute_blob_lookup,
     precompute_sparkle_lookup,
+    precompute_text_overlay_lookup,
     render_blob_layers,
 )
 from dullmv.parser import parse_file
@@ -159,13 +163,22 @@ def _init_worker(serialized_ctx: dict, effects: list, profile: bool) -> None:
     _WORKER_CTX = _deserialize_ctx(serialized_ctx)
     _WORKER_EFFECTS = effects
     _WORKER_PROFILE = profile
+    h, w = _WORKER_CTX["height"], _WORKER_CTX["width"]
+    _WORKER_CTX["_frame_buffer"] = np.empty((h, w, 3), dtype=np.uint16)
+    _WORKER_CTX["_float_buffer"] = np.empty((h, w, 3), dtype=np.float32)
 
 
 def _render_frame_worker(fi: int) -> tuple[int, np.ndarray, dict[str, float] | None]:
     assert _WORKER_CTX is not None and _WORKER_EFFECTS is not None
     timings = {} if _WORKER_PROFILE else None
-    frame = render_frame(fi, _WORKER_EFFECTS, _WORKER_CTX, profile_timings=timings)
+    frame = render_frame(
+        fi, _WORKER_EFFECTS, _WORKER_CTX, profile_timings=timings, reuse_buffers=True
+    )
     return fi, frame, timings
+
+
+def _pool_chunksize(n_frames: int, workers: int) -> int:
+    return max(1, n_frames // max(workers * 8, 1))
 
 
 def render_frame(
@@ -269,12 +282,15 @@ def _render_frames_parallel(
     frames: list[np.ndarray | None] = [None] * n_frames
 
     t0 = time.perf_counter()
+    chunksize = _pool_chunksize(n_frames, workers)
     with ProcessPoolExecutor(
         max_workers=workers,
         initializer=_init_worker,
         initargs=(serialized, effects, profile),
     ) as pool:
-        for fi, frame, timings in pool.map(_render_frame_worker, range(n_frames), chunksize=4):
+        for fi, frame, timings in pool.map(
+            _render_frame_worker, range(n_frames), chunksize=chunksize
+        ):
             frames[fi] = frame
             if timings:
                 for name, secs in timings.items():
@@ -308,6 +324,83 @@ def _render_frames_sequential(
                 stats.effect_seconds[name] = stats.effect_seconds.get(name, 0.0) + secs
     stats.frame_seconds = time.perf_counter() - t0
     return frames, stats
+
+
+def _encode_frames_to_mp4(
+    frames: list[np.ndarray],
+    audio_clip,
+    out_path: Path,
+    *,
+    fps: int,
+    size: tuple[int, int],
+    preset: str,
+    threads: int,
+) -> None:
+    """Write rendered frames to MP4 using MoviePy's FFMPEG writer."""
+    fd, temp_audio = tempfile.mkstemp(suffix=".m4a")
+    os.close(fd)
+    temp_audio_path = Path(temp_audio)
+    writer = None
+    try:
+        audio_clip.write_audiofile(str(temp_audio_path), codec="aac", logger=None)
+        writer = FFMPEG_VideoWriter(
+            str(out_path),
+            size=size,
+            fps=fps,
+            codec="libx264",
+            audiofile=str(temp_audio_path),
+            audio_codec="copy",
+            preset=preset,
+            threads=threads,
+        )
+        for frame in frames:
+            if frame.dtype != np.uint8:
+                frame = np.clip(frame, 0, 255).astype(np.uint8)
+            writer.write_frame(np.ascontiguousarray(frame))
+        writer.close()
+        writer = None
+    finally:
+        if writer is not None:
+            writer.close()
+        temp_audio_path.unlink(missing_ok=True)
+
+
+def _precompute_effect_lookups(
+    effects: list,
+    n_frames: int,
+    fps: int,
+    ctx: dict,
+    opening_duration: float,
+) -> None:
+    ctx.setdefault("_blob_lookup", {})
+    ctx.setdefault("_sparkle_lookup", {})
+    ctx.setdefault("_text_overlay_lookup", {})
+
+    for idx, effect in enumerate(effects):
+        name = effect.get("_name")
+        if name == "sparkle":
+            sparkle_id = f"sparkle_{idx}"
+            effect["_sparkle_id"] = sparkle_id
+            print(f"Precomputing sparkle lookup ({n_frames} frames)...")
+            ctx["_sparkle_lookup"][sparkle_id] = precompute_sparkle_lookup(
+                effect, n_frames, fps, ctx
+            )
+        elif name in ("light_overlay", "smoke"):
+            blob_id = f"{name}_{idx}"
+            effect["_blob_id"] = blob_id
+            compute_dist = name == "smoke"
+            print(f"Precomputing {name} lookup ({n_frames} frames)...")
+            ctx["_blob_lookup"][blob_id] = precompute_blob_lookup(
+                effect, n_frames, fps, ctx, compute_dist_ratio=compute_dist
+            )
+        elif name == "text":
+            text_id = f"text_{idx}"
+            effect["_text_id"] = text_id
+            n_open = min(n_frames, int(math.ceil(opening_duration * fps)))
+            print(f"Precomputing text overlay lookup ({n_open} frames)...")
+            ctx["_text_overlay_lookup"][text_id] = precompute_text_overlay_lookup(
+                effect, n_frames, fps, ctx, opening_duration
+            )
 
 
 def generate(
@@ -486,29 +579,18 @@ def generate(
         "pre_sy": pre_sy,
         "fps": fps,
         "_sparkle_lookup": {},
+        "_blob_lookup": {},
+        "_text_overlay_lookup": {},
     }
 
     effects = dsl.get("effects", [])
-    for idx, effect in enumerate(effects):
-        if effect.get("_name") == "sparkle":
-            sparkle_id = f"sparkle_{idx}"
-            effect["_sparkle_id"] = sparkle_id
-            print(f"Precomputing sparkle lookup ({n_frames} frames)...")
-            ctx["_sparkle_lookup"][sparkle_id] = precompute_sparkle_lookup(
-                effect, n_frames, fps, ctx
-            )
+    _precompute_effect_lookups(effects, n_frames, fps, ctx, opening_duration)
 
     print(f"Rendering {duration:.1f}s clip ({n_frames} frames, workers={workers})...")
     if workers > 1:
         frames, profile_stats = _render_frames_parallel(n_frames, effects, ctx, workers, profile)
     else:
         frames, profile_stats = _render_frames_sequential(n_frames, effects, ctx, profile)
-
-    def make_frame(t):
-        fi = min(int(t * fps), len(frames) - 1)
-        return frames[fi]
-
-    clip = VideoClip(make_frame, duration=duration).with_fps(fps).with_audio(audio)
 
     if out_path is None:
         out_path = default_output_path(dsl_path)
@@ -517,14 +599,14 @@ def generate(
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
     encode_start = time.perf_counter()
-    clip.write_videofile(
-        str(out_path),
+    _encode_frames_to_mp4(
+        frames,
+        audio,
+        out_path,
         fps=fps,
-        codec="libx264",
-        audio_codec="aac",
+        size=size,
         preset=preset,
         threads=encode_threads,
-        logger=None,
     )
     profile_stats.encode_seconds = time.perf_counter() - encode_start
 
