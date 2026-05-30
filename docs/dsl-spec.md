@@ -103,6 +103,8 @@ Top-level keys outside any `effect` block. All paths are relative to the `.dsl` 
 | `blob_scale` | int | `8` | Downscale factor for blob rendering optimization. |
 | `beat_decay` | float | `0.35` | Beat intensity decay time in seconds. |
 | `preset` | string | `"medium"` | x264 encoding preset. Slower presets yield better compression. Options: `"ultrafast"`, `"superfast"`, `"veryfast"`, `"faster"`, `"fast"`, `"medium"`, `"slow"`, `"slower"`, `"veryslow"`. |
+| `workers` | int | *(CPU count)* | Parallel processes for frame generation. Use `1` to force single-threaded rendering. |
+| `threads` | int | *(CPU count)* | FFmpeg encoder thread count. |
 | `font` | string | `"C:\\Windows\\Fonts\\impact.ttf"` | Font file path for text effects. |
 | `font_size` | int | `140` | Font size for text effects. |
 

@@ -4,6 +4,7 @@ import bisect
 import math
 import random as py_random
 
+import cv2
 import numpy as np
 from PIL import Image, ImageDraw
 
@@ -109,8 +110,8 @@ def render_blob_layers(w, h, blobs, scale=8):
     canvas[:, :, 3] = np.clip(acc_alpha, 0, 255)
     canvas = np.clip(canvas, 0, 255).astype(np.uint8)
     cropped = canvas[pad : pad + sh, pad : pad + sw]
-    img = Image.fromarray(cropped, mode="RGBA").resize((w, h), Image.BILINEAR)
-    return np.array(img).astype(np.uint16)
+    upscaled = cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
+    return upscaled.astype(np.uint16)
 
 
 def get_corners(h, w, ratio=0.25):
@@ -209,7 +210,6 @@ def render_spectrum(params, frame, t, ctx):
     boost = params.get("boost", 1.2)
 
     max_h = int(h * max_h_ratio)
-    base_y = h
     bar_w = w / n_bars
 
     sr = ctx["sr"]
@@ -218,21 +218,22 @@ def render_spectrum(params, frame, t, ctx):
 
     frame_idx = min(int(t * sr / hop), spectrum_norm.shape[0] - 1)
     norms = spectrum_norm[frame_idx]
-    heights = [min(int(v * max_h * boost), max_h) for v in norms]
+    heights = np.minimum((norms * max_h * boost).astype(np.int32), max_h)
 
-    # NumPy-based alpha blend (avoid heavy PIL conversion)
     cr, cg, cb = color
     base_alpha = alpha / 255.0
+    inv_alpha = 1.0 - base_alpha
     result = frame.astype(np.float32)
-    for i, bh in enumerate(heights):
-        x1 = int(i * bar_w)
-        x2 = w if i == n_bars - 1 else int((i + 1) * bar_w)
-        y1 = base_y - int(bh)
-        if bh > 0 and x2 > x1 and base_y > y1:
-            region = result[y1:base_y, x1:x2]
-            region[:, :, 0] = region[:, :, 0] * (1 - base_alpha) + cr * base_alpha
-            region[:, :, 1] = region[:, :, 1] * (1 - base_alpha) + cg * base_alpha
-            region[:, :, 2] = region[:, :, 2] * (1 - base_alpha) + cb * base_alpha
+
+    cols = np.arange(w, dtype=np.int32)
+    bar_idx = np.minimum((cols / bar_w).astype(np.int32), n_bars - 1)
+    bar_heights = heights[bar_idx]
+    rows = np.arange(h, dtype=np.int32)
+    mask = rows[:, None] >= (h - bar_heights)[None, :]
+
+    result[:, :, 0] = np.where(mask, result[:, :, 0] * inv_alpha + cr * base_alpha, result[:, :, 0])
+    result[:, :, 1] = np.where(mask, result[:, :, 1] * inv_alpha + cg * base_alpha, result[:, :, 1])
+    result[:, :, 2] = np.where(mask, result[:, :, 2] * inv_alpha + cb * base_alpha, result[:, :, 2])
     return np.clip(result, 0, 255).astype(np.uint16)
 
 
@@ -289,11 +290,7 @@ def render_smoke(params, frame, t, ctx):
     return frame
 
 
-def render_text(params, frame, t, ctx):
-    opening_dur = ctx.get("opening_duration", 3.0)
-    if t >= opening_dur:
-        return frame
-
+def _build_text_overlay_rgba(params, t, ctx):
     w, h = ctx["width"], ctx["height"]
     overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
@@ -343,9 +340,39 @@ def render_text(params, frame, t, ctx):
         cr, cg, cb = color
         draw.text((x, y), text_str, font=font, fill=(cr, cg, cb, alpha))
 
+    return np.array(overlay)
+
+
+def render_text(params, frame, t, ctx):
+    opening_dur = ctx.get("opening_duration", 3.0)
+    if t >= opening_dur:
+        return frame
+
+    fps = ctx.get("fps", 30)
+    fi = ctx.get("_frame_index", int(round(t * fps)))
+    cache_key = (id(params), fi)
+    cache = ctx.setdefault("_text_overlay_cache", {})
+    if cache_key not in cache:
+        cache[cache_key] = _build_text_overlay_rgba(params, t, ctx)
+
+    overlay = cache[cache_key]
     base_img = Image.fromarray(np.clip(frame, 0, 255).astype(np.uint8)).convert("RGBA")
-    result = Image.alpha_composite(base_img, overlay)
+    result = Image.alpha_composite(base_img, Image.fromarray(overlay))
     return np.array(result.convert("RGB")).astype(np.uint16)
+
+
+def _apply_wave_shifts(region, shifts, min_shift):
+    """Apply per-row horizontal shifts to a corner region block."""
+    out = region.copy()
+    for i, shift in enumerate(shifts):
+        if abs(shift) < min_shift:
+            continue
+        row = region[i]
+        if shift > 0:
+            out[i, shift:] = row[:-shift]
+        elif shift < 0:
+            out[i, :shift] = row[-shift:]
+    return out
 
 
 def render_glitch(params, frame, t, ctx):
@@ -370,18 +397,18 @@ def render_glitch(params, frame, t, ctx):
                 wave_h = int(_eval_param(wave_h_expr, env))
 
                 wave_y = y1 + int(np.random.random() * max(1, ch - wave_h))
+                y_end = min(wave_y + wave_h, y2)
+                if wave_y >= y_end:
+                    continue
 
                 base_shift_expr = params.get("base_shift", "(random() - 0.5) * 10")
                 base_shift = int(_eval_param(base_shift_expr, env))
 
-                for row in range(wave_y, min(wave_y + wave_h, y2)):
-                    progress = (row - wave_y) / wave_h
-                    wave_factor = math.sin(progress * math.pi)
-                    shift = int(base_shift * wave_factor)
-                    if abs(shift) >= min_shift:
-                        row_data = result[row : row + 1, x1:x2].copy()
-                        shifted = shift_region_horizontal(row_data, shift)
-                        result[row : row + 1, x1:x2] = shifted
+                wave_rows = np.arange(wave_y, y_end)
+                progress = (wave_rows - wave_y) / wave_h
+                shifts = (base_shift * np.sin(progress * math.pi)).astype(np.int32)
+                region = result[wave_y:y_end, x1:x2]
+                result[wave_y:y_end, x1:x2] = _apply_wave_shifts(region, shifts, min_shift)
     return result
 
 
@@ -396,6 +423,20 @@ def _shift_with_edge_pad(arr, sx, sy):
     return padded[y0 : y0 + h, x0 : x0 + w]
 
 
+def _shift_rgb_channels(frame, channel_shifts):
+    """Shift RGB channels with a single pad operation."""
+    h, w = frame.shape[:2]
+    max_pad_x = max(abs(int(sx)) for sx, _ in channel_shifts)
+    max_pad_y = max(abs(int(sy)) for _, sy in channel_shifts)
+    padded = np.pad(frame, ((max_pad_y, max_pad_y), (max_pad_x, max_pad_x), (0, 0)), mode="edge")
+    result = np.zeros_like(frame)
+    for c, (sx, sy) in enumerate(channel_shifts):
+        y0 = max_pad_y + int(sy)
+        x0 = max_pad_x + int(sx)
+        result[:, :, c] = padded[y0 : y0 + h, x0 : x0 + w, c]
+    return result
+
+
 def render_bass_shake(params, frame, t, ctx):
     fps = ctx.get("fps", 30)
     pre_sx = ctx.get("pre_sx")
@@ -405,7 +446,6 @@ def render_bass_shake(params, frame, t, ctx):
     direction = params.get("direction", "both")
     osc_freq = params.get("oscillation_freq", 14.0)
 
-    # Use pre-computed raw shift values (init-time calculation)
     if pre_sx is not None and pre_sy is not None:
         fi = min(int(round(t * fps)), len(pre_sx) - 1)
         total_shift_x = float(pre_sx[fi])
@@ -413,7 +453,6 @@ def render_bass_shake(params, frame, t, ctx):
     else:
         return frame
 
-    # Direction clamp
     if direction == "horizontal":
         total_shift_y = 0.0
     elif direction == "vertical":
@@ -422,25 +461,20 @@ def render_bass_shake(params, frame, t, ctx):
     sx = int(total_shift_x)
     sy = int(total_shift_y)
 
-    # Zoom shake removed: zoom=0.03 has negligible visual impact but costs
-    # a full 1920x1080 PIL resize every frame.
-
-    # RGB chromatic split shift with edge padding
     if rgb_split > 0 and (sx != 0 or sy != 0):
         phase = t * osc_freq
         offsets = [
-            (math.sin(phase), math.cos(phase)),  # R
-            (math.sin(phase + 2.1), math.cos(phase + 2.1)),  # G
-            (math.sin(phase + 4.2), math.cos(phase + 4.2)),  # B
+            (math.sin(phase), math.cos(phase)),
+            (math.sin(phase + 2.1), math.cos(phase + 2.1)),
+            (math.sin(phase + 4.2), math.cos(phase + 4.2)),
         ]
-        result = np.zeros_like(frame)
-        for c in range(3):
-            ox = sx + int(rgb_split * offsets[c][0]) if direction in ("horizontal", "both") else 0
-            oy = sy + int(rgb_split * offsets[c][1]) if direction in ("vertical", "both") else 0
-            result[:, :, c] = _shift_with_edge_pad(frame[:, :, c : c + 1], ox, oy)[:, :, 0]
-        return result
+        channel_shifts = []
+        for ox_raw, oy_raw in offsets:
+            ox = sx + int(rgb_split * ox_raw) if direction in ("horizontal", "both") else 0
+            oy = sy + int(rgb_split * oy_raw) if direction in ("vertical", "both") else 0
+            channel_shifts.append((ox, oy))
+        return _shift_rgb_channels(frame, channel_shifts)
 
-    # Normal shift with edge padding (no RGB split)
     if sx != 0 or sy != 0:
         ox = sx if direction in ("horizontal", "both") else 0
         oy = sy if direction in ("vertical", "both") else 0
@@ -455,60 +489,40 @@ def _pick_sparkle_pos(w, h, edge_bias, central_exclusion):
     for _ in range(max_attempts):
         if np.random.random() < edge_bias:
             edge = np.random.randint(0, 4)
-            if edge == 0:  # left
+            if edge == 0:
                 x = np.random.randint(0, margin)
                 y = np.random.randint(0, h)
-            elif edge == 1:  # right
+            elif edge == 1:
                 x = np.random.randint(w - margin, w)
                 y = np.random.randint(0, h)
-            elif edge == 2:  # top
+            elif edge == 2:
                 x = np.random.randint(0, w)
                 y = np.random.randint(0, margin)
-            else:  # bottom
+            else:
                 x = np.random.randint(0, w)
                 y = np.random.randint(h - margin, h)
         else:
             x = np.random.randint(0, w)
             y = np.random.randint(0, h)
 
-        # Central exclusion check (relative to half-dimensions)
         if central_exclusion > 0:
             dx = abs(x - w / 2) / (w / 2)
             dy = abs(y - h / 2) / (h / 2)
             if dx < central_exclusion and dy < central_exclusion:
-                continue  # retry if inside excluded center
+                continue
         return x, y
-    # fallback: force edge if all attempts failed
     edge = np.random.randint(0, 4)
     if edge == 0:
         return np.random.randint(0, margin), np.random.randint(0, h)
-    elif edge == 1:
+    if edge == 1:
         return np.random.randint(w - margin, w), np.random.randint(0, h)
-    elif edge == 2:
+    if edge == 2:
         return np.random.randint(0, w), np.random.randint(0, margin)
-    else:
-        return np.random.randint(0, w), np.random.randint(h - margin, h)
+    return np.random.randint(0, w), np.random.randint(h - margin, h)
 
 
-def _get_sparkle_blobs(params, t, ctx):
-    w, h = ctx["width"], ctx["height"]
-    n_spots = params.get("spots", 20)
-    base_radius = params.get("base_radius", 30)
-    radius_var = params.get("radius_var", 15)
-    base_alpha = params.get("base_alpha", 150)
-    color = params.get("color", (255, 255, 255))
-    if isinstance(color, list):
-        color = tuple(color)
-    edge_bias = params.get("edge_bias", 0.7)
+def _sparkle_intensity(params, t, ctx):
     intensity_scale = params.get("intensity_scale", 1.5)
-    pulse_freq = params.get("pulse_freq", 8.0)
-    decay = params.get("decay", 0.15)
-    central_exclusion = params.get("central_exclusion", 0.35)
-    brightness_boost = params.get("brightness_boost", 2.5)
-    fade_mode = params.get("fade_mode", "exponential")
-    alpha_cutoff = params.get("alpha_cutoff", 0.0)
-    fps = ctx.get("fps", 30)
-
     bass_fn = ctx.get("bass_intensity")
     if bass_fn:
         intensity = bass_fn(t)
@@ -523,49 +537,15 @@ def _get_sparkle_blobs(params, t, ctx):
             intensity = float(np.mean(freqs)) / global_max_mean
         else:
             intensity = 0.0
+    return intensity * intensity_scale
 
-    intensity *= intensity_scale
 
-    # --- State management for decaying sparkles ---
-    state_key = "_sparkle_state"
-    if state_key not in ctx:
-        ctx[state_key] = []
-    state = ctx[state_key]
+def _sparkle_blobs_from_state(params, t, state):
+    decay = params.get("decay", 0.15)
+    fade_mode = params.get("fade_mode", "exponential")
+    alpha_cutoff = params.get("alpha_cutoff", 0.0)
+    brightness_boost = params.get("brightness_boost", 2.5)
 
-    # Remove dead sparkles
-    state = [s for s in state if (t - s["birth_t"]) < decay]
-
-    # Add new sparkles based on intensity, capped by total simultaneous limit (spots)
-    current_alive = len(state)
-    available = max(0, n_spots - current_alive)
-    desired = int(n_spots * min(intensity, 1.0))
-    new_count = min(available, desired)
-    if new_count > 0:
-        np.random.seed(int(t * fps * 1000) % 2**16)
-        for _ in range(new_count):
-            x, y = _pick_sparkle_pos(w, h, edge_bias, central_exclusion)
-            r = base_radius + np.random.random() * radius_var
-            r = r * (0.5 + 0.5 * intensity)
-            max_alpha = base_alpha * intensity
-            if pulse_freq > 0:
-                max_alpha *= 0.5 + 0.5 * abs(
-                    math.sin(t * pulse_freq * 2 * math.pi + np.random.random() * math.pi)
-                )
-            state.append(
-                {
-                    "birth_t": t,
-                    "cx": int(x),
-                    "cy": int(y),
-                    "rx": int(r),
-                    "ry": int(r),
-                    "color": color,
-                    "max_alpha": float(min(max_alpha, 255)),
-                }
-            )
-
-    ctx[state_key] = state
-
-    # Build blobs from current state with decay applied
     blobs = []
     for s in state:
         age = t - s["birth_t"]
@@ -590,6 +570,79 @@ def _get_sparkle_blobs(params, t, ctx):
             }
         )
     return blobs, brightness_boost
+
+
+def _advance_sparkle_state(params, t, fps, ctx, state):
+    w, h = ctx["width"], ctx["height"]
+    n_spots = params.get("spots", 20)
+    base_radius = params.get("base_radius", 30)
+    radius_var = params.get("radius_var", 15)
+    base_alpha = params.get("base_alpha", 150)
+    color = params.get("color", (255, 255, 255))
+    if isinstance(color, list):
+        color = tuple(color)
+    edge_bias = params.get("edge_bias", 0.7)
+    pulse_freq = params.get("pulse_freq", 8.0)
+    decay = params.get("decay", 0.15)
+
+    intensity = _sparkle_intensity(params, t, ctx)
+    state[:] = [s for s in state if (t - s["birth_t"]) < decay]
+
+    current_alive = len(state)
+    available = max(0, n_spots - current_alive)
+    desired = int(n_spots * min(intensity, 1.0))
+    new_count = min(available, desired)
+    if new_count > 0:
+        np.random.seed(int(t * fps * 1000) % 2**16)
+        for _ in range(new_count):
+            x, y = _pick_sparkle_pos(w, h, edge_bias, params.get("central_exclusion", 0.35))
+            r = base_radius + np.random.random() * radius_var
+            r = r * (0.5 + 0.5 * intensity)
+            max_alpha = base_alpha * intensity
+            if pulse_freq > 0:
+                max_alpha *= 0.5 + 0.5 * abs(
+                    math.sin(t * pulse_freq * 2 * math.pi + np.random.random() * math.pi)
+                )
+            state.append(
+                {
+                    "birth_t": t,
+                    "cx": int(x),
+                    "cy": int(y),
+                    "rx": int(r),
+                    "ry": int(r),
+                    "color": color,
+                    "max_alpha": float(min(max_alpha, 255)),
+                }
+            )
+
+
+def precompute_sparkle_lookup(params, n_frames, fps, ctx):
+    """Precompute sparkle blobs per frame for parallel rendering."""
+    state: list[dict] = []
+    lookup: list[tuple[list, float]] = []
+    for fi in range(n_frames):
+        t = fi / fps
+        _advance_sparkle_state(params, t, fps, ctx, state)
+        lookup.append(_sparkle_blobs_from_state(params, t, state))
+    return lookup
+
+
+def _get_sparkle_blobs(params, t, ctx):
+    sparkle_id = params.get("_sparkle_id")
+    lookup = ctx.get("_sparkle_lookup")
+    if sparkle_id is not None and lookup is not None and sparkle_id in lookup:
+        fi = ctx.get("_frame_index", int(round(t * ctx.get("fps", 30))))
+        fi = min(max(fi, 0), len(lookup[sparkle_id]) - 1)
+        return lookup[sparkle_id][fi]
+
+    fps = ctx.get("fps", 30)
+    state_key = "_sparkle_state"
+    if state_key not in ctx:
+        ctx[state_key] = []
+    state = ctx[state_key]
+    _advance_sparkle_state(params, t, fps, ctx, state)
+    ctx[state_key] = state
+    return _sparkle_blobs_from_state(params, t, state)
 
 
 def render_sparkle(params, frame, t, ctx):
