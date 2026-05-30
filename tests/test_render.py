@@ -28,7 +28,7 @@ from dullmv.generator import (
 )
 from dullmv.parser import parse_file
 
-_TEMPLATE_DSL = Path(__file__).resolve().parents[1] / "dsl" / "template.dsl"
+_TEMPLATE_DSL = Path(__file__).resolve().parents[1] / "examples" / "template.dsl"
 
 
 def load_template_effects() -> list[dict]:
