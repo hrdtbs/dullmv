@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# dullmv media directories
+dsl/
+inputs/*
+!inputs/.gitkeep
+outputs/*
+!outputs/.gitkeep
+*.mp4
