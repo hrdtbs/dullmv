@@ -69,8 +69,9 @@ def _add_batch_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     parser.add_argument(
         "--skip-existing",
-        action="store_true",
-        help="Skip jobs whose output MP4 already exists",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Skip jobs whose output MP4 already exists (default: enabled)",
     )
     parser.add_argument(
         "--dry-run",

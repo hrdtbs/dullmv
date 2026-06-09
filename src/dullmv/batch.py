@@ -80,7 +80,7 @@ def run_batch(
     jobs: list[BatchJob],
     output_dir: Path,
     *,
-    skip_existing: bool = False,
+    skip_existing: bool = True,
     dry_run: bool = False,
     continue_on_error: bool = False,
     workers: int | None = None,

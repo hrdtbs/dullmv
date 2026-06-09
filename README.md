@@ -67,10 +67,10 @@ Preview discovered jobs without rendering:
 uv run python -m dullmv batch examples/template.dsl --dry-run
 ```
 
-Skip pairs whose output already exists:
+Existing outputs are skipped by default. Re-render them with:
 
 ```bash
-uv run python -m dullmv batch examples/template.dsl --skip-existing
+uv run python -m dullmv batch examples/template.dsl --no-skip-existing
 ```
 
 #### Input layout

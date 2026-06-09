@@ -101,7 +101,7 @@ def test_run_batch_dry_run(tmp_path: Path) -> None:
     assert not output_dir.exists() or not any(output_dir.iterdir())
 
 
-def test_run_batch_skip_existing(tmp_path: Path) -> None:
+def test_run_batch_skip_existing_by_default(tmp_path: Path) -> None:
     inputs_dir = tmp_path / "inputs"
     inputs_dir.mkdir()
     _touch(inputs_dir / "track_a.png")
@@ -117,14 +117,34 @@ def test_run_batch_skip_existing(tmp_path: Path) -> None:
 
     jobs, _warnings = discover_jobs(inputs_dir)
     with patch("dullmv.batch.generate") as generate_mock:
-        result = run_batch(
-            dsl_path,
-            jobs,
-            output_dir,
-            skip_existing=True,
-        )
+        result = run_batch(dsl_path, jobs, output_dir)
 
     assert len(result.skipped) == 1
     assert result.skipped[0][0].name == "track_a"
     assert generate_mock.call_count == 1
     assert generate_mock.call_args.kwargs["base_image"].name == "track_b.jpg"
+
+
+def test_run_batch_no_skip_existing(tmp_path: Path) -> None:
+    inputs_dir = tmp_path / "inputs"
+    inputs_dir.mkdir()
+    _touch(inputs_dir / "track_a.png")
+    _touch(inputs_dir / "track_a.wav")
+
+    dsl_path = tmp_path / "template.dsl"
+    dsl_path.write_text("size 640 360\n", encoding="utf-8")
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    (output_dir / "track_a.mp4").write_bytes(b"existing")
+
+    jobs, _warnings = discover_jobs(inputs_dir)
+    with patch("dullmv.batch.generate") as generate_mock:
+        result = run_batch(
+            dsl_path,
+            jobs,
+            output_dir,
+            skip_existing=False,
+        )
+
+    assert result.skipped == []
+    assert generate_mock.call_count == 1
