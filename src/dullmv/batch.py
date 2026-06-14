@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import os
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from dullmv.generator import find_project_root, generate
+from dullmv.capcut.pipeline import render
+from dullmv.paths import find_project_root
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
@@ -76,32 +75,31 @@ def discover_jobs(inputs_dir: Path) -> tuple[list[BatchJob], list[str]]:
 
 
 def run_batch(
-    dsl_path: Path,
+    config_path: Path,
     jobs: list[BatchJob],
     output_dir: Path,
     *,
     skip_existing: bool = True,
     dry_run: bool = False,
     continue_on_error: bool = False,
-    workers: int | None = None,
     profile: bool = False,
     parallel_jobs: int = 1,
+    skip_export: bool = False,
 ) -> BatchResult:
-    dsl_path = dsl_path.resolve()
+    config_path = config_path.resolve()
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    if parallel_jobs > 1:
+        print(
+            "Warning: CapCut UI export cannot run in parallel; forcing --jobs 1",
+            file=sys.stderr,
+        )
+        parallel_jobs = 1
+
     result = BatchResult()
-    parallel_jobs = max(1, parallel_jobs)
 
-    def _resolve_workers() -> int | None:
-        if workers is not None:
-            return workers
-        if parallel_jobs > 1:
-            return max(1, (os.cpu_count() or 1) // parallel_jobs)
-        return None
-
-    def _render_job(index: int, job: BatchJob) -> tuple[BatchJob, str | None, str | None]:
+    for index, job in enumerate(jobs, start=1):
         out_path = output_dir / job.output_name
         print(f"[{index}/{len(jobs)}] {job.name}")
         print(f"  image: {job.image}")
@@ -109,64 +107,37 @@ def run_batch(
         print(f"  output: {out_path}")
 
         if skip_existing and out_path.is_file():
-            return job, "skipped", "output already exists"
+            print("  skipped: output already exists")
+            result.skipped.append((job, "output already exists"))
+            continue
 
         if dry_run:
-            return job, "succeeded", None
+            result.succeeded.append(job)
+            continue
 
         try:
-            generate(
-                dsl_path,
+            render(
+                config_path,
                 out_path,
-                base_image=job.image,
+                job_name=job.name,
+                image=job.image,
                 audio=job.audio,
-                workers=_resolve_workers(),
                 profile=profile,
+                skip_export=skip_export,
             )
-            return job, "succeeded", None
+            result.succeeded.append(job)
         except Exception as exc:
-            return job, "failed", str(exc)
-
-    if parallel_jobs <= 1 or dry_run:
-        for index, job in enumerate(jobs, start=1):
-            job_result, status, message = _render_job(index, job)
-            if status == "skipped":
-                print(f"  skipped: {message}")
-                result.skipped.append((job_result, message or ""))
-            elif status == "failed":
-                print(f"  failed: {message}", file=sys.stderr)
-                result.failed.append((job_result, message or ""))
-                if not continue_on_error:
-                    break
-            else:
-                result.succeeded.append(job_result)
-        return result
-
-    with ThreadPoolExecutor(max_workers=parallel_jobs) as pool:
-        futures = {
-            pool.submit(_render_job, index, job): job for index, job in enumerate(jobs, start=1)
-        }
-        for future in as_completed(futures):
-            job_result, status, message = future.result()
-            if status == "skipped":
-                print(f"  skipped: {job_result.name} ({message})")
-                result.skipped.append((job_result, message or ""))
-            elif status == "failed":
-                print(f"  failed: {job_result.name}: {message}", file=sys.stderr)
-                result.failed.append((job_result, message or ""))
-                if not continue_on_error:
-                    for pending in futures:
-                        pending.cancel()
-                    break
-            else:
-                result.succeeded.append(job_result)
+            print(f"  failed: {exc}", file=sys.stderr)
+            result.failed.append((job, str(exc)))
+            if not continue_on_error:
+                break
 
     return result
 
 
-def default_inputs_dir(dsl_path: Path) -> Path:
-    return find_project_root(dsl_path.parent) / "inputs"
+def default_inputs_dir(config_path: Path) -> Path:
+    return find_project_root(config_path.parent) / "inputs"
 
 
-def default_output_dir(dsl_path: Path) -> Path:
-    return find_project_root(dsl_path.parent) / "outputs"
+def default_output_dir(config_path: Path) -> Path:
+    return find_project_root(config_path.parent) / "outputs"

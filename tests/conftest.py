@@ -8,5 +8,5 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
 @pytest.fixture
-def minimal_dsl_text() -> str:
-    return (FIXTURES_DIR / "minimal.dsl").read_text(encoding="utf-8")
+def sample_config_text() -> str:
+    return (FIXTURES_DIR / "sample.yaml").read_text(encoding="utf-8")

@@ -1,14 +1,12 @@
 [project]
 name = "dullmv"
-version = "0.1.0"
-description = "DSL-driven music video generator"
+version = "0.2.0"
+description = "CapCut template-driven music video generator"
 requires-python = ">=3.12"
 dependencies = [
-    "numpy",
-    "opencv-python-headless",
-    "pillow",
-    "librosa",
-    "moviepy",
+    "pycapcut>=0.0.3",
+    "pyyaml>=6.0.3",
+    "pydantic>=2",
 ]
 
 [project.optional-dependencies]

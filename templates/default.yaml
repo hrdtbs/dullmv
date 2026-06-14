@@ -1,0 +1,23 @@
+# CapCut drafts folder (override with CAPCUT_DRAFTS_DIR env var).
+drafts_dir: "C:/Users/harad/AppData/Local/CapCut/User Data/Projects/com.lveditor.draft"
+
+# Name of the template draft as shown in CapCut home.
+template_name: "MusicVideoTemplate"
+
+# Prefix for generated draft folders (template_name + job name).
+output_draft_prefix: "dullmv_"
+
+slots:
+  # Material names inside the template (usually the original file names).
+  image: "cover.png"
+  audio: "bgm.wav"
+  texts:
+    - segment_index: 0
+      content: "TITLE LINE ONE"
+    - segment_index: 1
+      content: "TITLE LINE TWO"
+
+export:
+  resolution: "1080P"
+  framerate: 30
+  timeout_sec: 1200
