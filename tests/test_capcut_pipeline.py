@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -41,9 +42,16 @@ def test_render_calls_export(tmp_path: Path, sample_config_text: str) -> None:
     audio.write_bytes(b"aud")
     output = tmp_path / "out.mp4"
 
+    controller_instance = MagicMock()
+    mock_export = MagicMock()
+    mock_export.CapCutController = MagicMock(return_value=controller_instance)
+    mock_export.resolve_resolution = MagicMock(return_value=None)
+    mock_export.resolve_framerate = MagicMock(return_value=None)
+
     with (
         patch("dullmv.capcut.pipeline.apply_template", return_value=("dullmv_demo", MagicMock())),
-        patch("dullmv.capcut.export.CapCutController") as controller_cls,
+        patch("dullmv.capcut.pipeline.sys.platform", "win32"),
+        patch.dict(sys.modules, {"dullmv.capcut.export": mock_export}),
     ):
         render(
             config_path,
@@ -53,4 +61,4 @@ def test_render_calls_export(tmp_path: Path, sample_config_text: str) -> None:
             audio=audio,
         )
 
-    controller_cls.return_value.export_draft.assert_called_once()
+    controller_instance.export_draft.assert_called_once()
