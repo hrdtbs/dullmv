@@ -1,3 +1,3 @@
-"""dullmv — DSL-driven music video generator."""
+"""dullmv — CapCut template music video generator."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

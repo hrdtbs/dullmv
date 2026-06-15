@@ -1,12 +1,13 @@
 ﻿# dullmv
 
-DSL-driven music video generator. Define effects, timing, and parameters in a `.dsl` file and render an MP4 without editing Python code.
+CapCut template-driven music video generator. Duplicate a CapCut draft template, swap image/audio/text slots from `inputs/`, and export MP4 via the CapCut desktop app.
 
 ## Prerequisites
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/)
-- [FFmpeg](https://ffmpeg.org/) (used by MoviePy for H.264/AAC encoding)
+- **Windows** with [CapCut](https://www.capcut.com/) (international edition) installed
+- A CapCut **template draft** saved locally (see below)
 
 ## Setup
 
@@ -17,65 +18,31 @@ uv sync --all-extras
 uv run pre-commit install
 ```
 
-Or run both steps in one command:
+Or:
 
 ```bash
 uv run python scripts/setup_dev.py
 ```
 
-### Input media
+## CapCut template preparation
 
-Place source images and audio in `inputs/`. This directory is gitignored.
+1. Design your music video template in CapCut (effects, transitions, text styles, etc.).
+2. Save it as a draft and note its name as shown on the CapCut home screen.
+3. Find your drafts folder: CapCut → **Settings** → **Drafts Location**  
+   Typical path: `C:\Users\<you>\AppData\Local\CapCut\User Data\Projects\com.lveditor.draft`
+4. Identify **material names** inside the template (usually the original file names, e.g. `cover.png`, `bgm.wav`).  
+   Use CapCut’s material panel or inspect the draft with `pycapcut` if needed.
 
-For the bundled examples, copy or symlink sample assets:
+Copy [`templates/default.yaml`](templates/default.yaml) and set:
 
-```bash
-# After cloning, if inputs/ is empty:
-cp /path/to/Bloom.png inputs/
-cp /path/to/Bloom.wav inputs/
-```
+- `drafts_dir` — your CapCut drafts folder (or set `CAPCUT_DRAFTS_DIR`)
+- `template_name` — exact draft name in CapCut
+- `slots.image` / `slots.audio` — material names to replace
+- `slots.texts` — optional text segment overrides
 
-The example DSL files in `examples/` reference `../inputs/Bloom.png` and `../inputs/Bloom.wav`.
+## Input media
 
-## Usage
-
-Render the sample project:
-
-```bash
-uv run python -m dullmv examples/test.dsl
-```
-
-Output is written to `outputs/test.mp4` by default.
-
-Custom output path:
-
-```bash
-uv run python -m dullmv examples/template.dsl -o outputs/custom.mp4
-```
-
-### Batch rendering
-
-Apply one template DSL to every image/audio pair under `inputs/` and write `outputs/<name>.mp4` for each pair:
-
-```bash
-uv run python -m dullmv batch examples/template.dsl
-```
-
-Preview discovered jobs without rendering:
-
-```bash
-uv run python -m dullmv batch examples/template.dsl --dry-run
-```
-
-Existing outputs are skipped by default. Re-render them with:
-
-```bash
-uv run python -m dullmv batch examples/template.dsl --no-skip-existing
-```
-
-#### Input layout
-
-Place image and audio files directly in `inputs/` with the same base name:
+Place source images and audio in `inputs/` (gitignored):
 
 ```
 inputs/
@@ -85,53 +52,72 @@ inputs/
   song02.mp3
 ```
 
-This produces `outputs/song01.mp4` and `outputs/song02.mp4`. Subdirectories under `inputs/` are ignored.
+Supported images: `.png`, `.jpg`, `.jpeg`, `.webp`  
+Supported audio: `.wav`, `.mp3`, `.flac`, `.ogg`, `.m4a`
 
-Supported image extensions: `.png`, `.jpg`, `.jpeg`, `.webp`. Supported audio extensions: `.wav`, `.mp3`, `.flac`, `.ogg`, `.m4a`.
+## Usage
 
-The template DSL keeps its effect definitions; `base_image` and `audio` paths in the file are overridden per job at render time.
+**Before rendering:** open CapCut on the **drafts home screen** and leave it running. Do not interact with CapCut during export.
+
+### Single render
+
+With one image/audio pair in `inputs/`:
+
+```bash
+uv run python -m dullmv render templates/default.yaml
+```
+
+Explicit paths:
+
+```bash
+uv run python -m dullmv render templates/default.yaml \
+  --image inputs/song01.png \
+  --audio inputs/song01.wav \
+  -o outputs/song01.mp4
+```
+
+Build draft only (no UI export):
+
+```bash
+uv run python -m dullmv render templates/default.yaml --skip-export
+```
+
+### Batch rendering
+
+```bash
+uv run python -m dullmv batch templates/default.yaml
+```
+
+Preview jobs:
+
+```bash
+uv run python -m dullmv batch templates/default.yaml --dry-run
+```
+
+Re-render existing outputs:
+
+```bash
+uv run python -m dullmv batch templates/default.yaml --no-skip-existing
+```
+
+## How it works
+
+dullmv uses [`pycapcut`](https://github.com/GuanYixuan/pyCapCut) directly (no separate capcut-mate/cutauto servers):
+
+1. **Duplicate** the template draft in your CapCut drafts folder
+2. **Replace** image, audio, and text slots via `replace_material_by_name` / `replace_text`
+3. **Save** `draft_content.json`
+4. **Export** MP4 by automating the CapCut desktop UI (`uiautomation`)
 
 ## Project layout
 
 | Path | Description |
 |------|-------------|
-| `src/dullmv/` | Python package (`parser`, `engine`, `generator`, `batch`, CLI) |
-| `examples/` | Sample `.dsl` files |
+| `src/dullmv/capcut/` | Config, draft builder, export controller, pipeline |
+| `templates/` | YAML template configs |
 | `inputs/` | Source media (gitignored) |
 | `outputs/` | Rendered videos (gitignored) |
-| `docs/dsl-spec.md` | Effect DSL specification |
 | `tests/` | Unit tests |
-
-## DSL overview
-
-A DSL file has global settings (resolution, fps, media paths) and ordered `effect` blocks:
-
-```dsl
-size 1280 720
-fps 30
-base_image "../inputs/Bloom.png"
-audio "../inputs/Bloom.wav"
-
-effect spectrum {
-    bars 96
-    color (255, 255, 255)
-    alpha 150
-}
-```
-
-Supported effects: `light_overlay`, `spectrum`, `smoke`, `text`, `glitch`, `bass_shake`, `sparkle`.
-
-See [docs/dsl-spec.md](docs/dsl-spec.md) for the full specification.
-
-## Font paths
-
-The `font` global setting is OS-specific. Examples use Windows Impact:
-
-```dsl
-font "C:\\Windows\\Fonts\\impact.ttf"
-```
-
-On macOS, a common alternative is `/System/Library/Fonts/Supplemental/Impact.ttf`. On Linux, install a compatible font and point `font` to its path.
 
 ## Development
 
@@ -139,14 +125,16 @@ On macOS, a common alternative is `/System/Library/Fonts/Supplemental/Impact.ttf
 uv run pytest
 uv run ruff check .
 uv run ruff format .
-uv run pre-commit run --all-files
 ```
 
-Re-register Git hooks after cloning on a new machine or if hooks were removed:
+Integration tests against real CapCut are skipped in CI. To run locally with CapCut open, use `--skip-export` for draft-only checks.
 
-```bash
-uv run pre-commit install
-```
+## Limitations
+
+- CapCut UI export is **serial only** (one job at a time).
+- Template drafts must use an **unencrypted** `draft_content.json` (template mode limitation in `pycapcut`).
+- Material names in YAML must **exactly match** names inside the CapCut template.
+- Unofficial automation; CapCut updates may break export.
 
 ## License
 

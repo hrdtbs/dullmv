@@ -1,0 +1,12 @@
+drafts_dir: "C:/CapCut/Drafts"
+template_name: "TestTemplate"
+output_draft_prefix: "dullmv_"
+slots:
+  image: "cover.png"
+  audio: "bgm.wav"
+  texts:
+    - segment_index: 0
+      content: "Hello"
+export:
+  resolution: "1080P"
+  framerate: 30
